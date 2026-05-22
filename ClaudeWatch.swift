@@ -7,6 +7,10 @@ let KEYCHAIN_SERVICE = "Claude Code-credentials"
 let REFRESH_INTERVAL: TimeInterval = 300  // 5 minutes
 // extra_usage dollar amounts come back in cents; divide to get dollars.
 let CENTS_PER_DOLLAR = 100.0
+// Bar fill is dark yellow normally, switching to red once a window passes this %.
+let WARN_THRESHOLD = 60.0
+let NORMAL_COLOR = NSColor(calibratedRed: 0.72, green: 0.58, blue: 0.0, alpha: 1.0)  // dark yellow
+let WARN_COLOR = NSColor.systemRed
 
 // MARK: - Models
 struct UsageWindow: Decodable {
@@ -142,7 +146,7 @@ func makeBarsImage(_ a: Double, _ b: Double) -> NSImage {
             if fillH > 0.5 {
                 let fill = NSBezierPath(roundedRect: NSRect(x: x, y: 0, width: barW, height: fillH),
                                         xRadius: radius, yRadius: radius)
-                NSColor.systemRed.setFill()
+                (vals[i] >= WARN_THRESHOLD ? WARN_COLOR : NORMAL_COLOR).setFill()
                 fill.fill()
             }
             // Thin white outline so the bar's extent is visible.

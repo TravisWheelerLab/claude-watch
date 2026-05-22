@@ -7,9 +7,10 @@ browser.
 
 ## What it shows
 
-In the menu bar: **two vertical red flood bars** (left = current 5-hour
-session, right = rolling 7-day weekly) that fill from the bottom as usage
-grows, plus a compact countdown (e.g. `2h33m`) to the next 5-hour reset.
+In the menu bar: **two vertical flood bars** (left = current 5-hour session,
+right = rolling 7-day weekly) that fill from the bottom as usage grows — dark
+yellow normally, switching to red once a window passes 60% — plus a compact
+countdown (e.g. `2h33m`) to the next 5-hour reset.
 
 Click it for a dropdown with the exact figures:
 

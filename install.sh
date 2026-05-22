@@ -40,9 +40,13 @@ cat > "$PLIST" <<EOF
 </plist>
 EOF
 
-# 4. (Re)load via launchd, then start immediately
+# 4. (Re)load via launchd, then start immediately.
+# bootout can lag behind; pause and retry bootstrap to avoid a race that
+# surfaces as "Bootstrap failed: 5: Input/output error".
 launchctl bootout "gui/$UID_NUM/$LABEL" 2>/dev/null || true
-launchctl bootstrap "gui/$UID_NUM" "$PLIST"
+sleep 1
+launchctl bootstrap "gui/$UID_NUM" "$PLIST" 2>/dev/null \
+  || { sleep 2; launchctl bootstrap "gui/$UID_NUM" "$PLIST"; }
 launchctl kickstart -k "gui/$UID_NUM/$LABEL"
 
 echo "Installed $DEST/$APP and loaded LaunchAgent $LABEL"

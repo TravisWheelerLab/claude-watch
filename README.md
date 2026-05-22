@@ -58,17 +58,29 @@ per-model windows, and an `extra_usage` block (whose dollar fields are in
 ## Build & run
 
 ```sh
-swiftc ClaudeMeter.swift -o claude-meter -framework Cocoa
-./claude-meter
+swiftc ClaudeWatch.swift -o claude-watch -framework Cocoa
+./claude-watch
 ```
 
 The first run may prompt for keychain access — choose **Always Allow**.
 
-## Start at login (optional)
+## Install & start at login
 
-Wrap the binary in a `.app` bundle and install a LaunchAgent
-(`~/Library/LaunchAgents/…plist`) with `RunAtLoad` + `KeepAlive` so it starts
-at login and relaunches if it crashes.
+```sh
+./install.sh
+```
+
+This builds `ClaudeWatch.app`, copies it to `~/Applications`, writes a
+LaunchAgent (`~/Library/LaunchAgents/com.traviswheeler.claudewatch.plist`) with
+`RunAtLoad` + `KeepAlive`, and loads it — so it runs now, starts at login, and
+relaunches if it crashes. `build.sh` builds the `.app` bundle only.
+
+To remove it:
+
+```sh
+launchctl bootout gui/$(id -u)/com.traviswheeler.claudewatch
+rm -rf ~/Applications/ClaudeWatch.app ~/Library/LaunchAgents/com.traviswheeler.claudewatch.plist
+```
 
 ## License
 

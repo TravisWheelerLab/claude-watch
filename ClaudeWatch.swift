@@ -65,7 +65,7 @@ func fetchUsage(_ completion: @escaping (FetchResult) -> Void) {
     req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
     req.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
     req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-    req.setValue("ClaudeMeter/0.1", forHTTPHeaderField: "User-Agent")
+    req.setValue("ClaudeWatch/0.1", forHTTPHeaderField: "User-Agent")
     req.timeoutInterval = 20
     req.cachePolicy = .reloadIgnoringLocalCacheData
     URLSession.shared.dataTask(with: req) { data, resp, err in
@@ -314,7 +314,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(openItem)
 
         menu.addItem(.separator())
-        let quit = NSMenuItem(title: "Quit ClaudeMeter", action: #selector(quitClicked), keyEquivalent: "q")
+        let quit = NSMenuItem(title: "Quit ClaudeWatch", action: #selector(quitClicked), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
     }

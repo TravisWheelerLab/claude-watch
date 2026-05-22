@@ -1,4 +1,5 @@
 # Compiled binary / build artifacts
+/claude-watch
 /claude-meter
 *.o
 build/

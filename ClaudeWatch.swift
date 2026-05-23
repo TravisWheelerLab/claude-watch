@@ -34,7 +34,8 @@ struct Usage: Decodable {
 
 enum FetchResult {
     case ok(Usage)
-    case authError
+    case authError            // 401/403 — credentials problem
+    case transient(String)    // 429 / 5xx / network — keep showing last good data
     case error(String)
 }
 
@@ -73,9 +74,10 @@ func fetchUsage(_ completion: @escaping (FetchResult) -> Void) {
     req.timeoutInterval = 20
     req.cachePolicy = .reloadIgnoringLocalCacheData
     URLSession.shared.dataTask(with: req) { data, resp, err in
-        if let err = err { completion(.error(err.localizedDescription)); return }
+        if let err = err { completion(.transient(err.localizedDescription)); return }
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
         if code == 401 || code == 403 { completion(.authError); return }
+        if code == 429 || (500...599).contains(code) { completion(.transient("HTTP \(code)")); return }
         guard code == 200, let data = data else { completion(.error("HTTP \(code)")); return }
         do { completion(.ok(try JSONDecoder().decode(Usage.self, from: data))) }
         catch { completion(.error("parse error")) }
@@ -170,6 +172,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var minuteTimer: Timer?
     var lastUpdated: Date?
     var fiveReset: String?   // ISO8601 of next 5h reset, for the countdown
+    var lastUsage: Usage?    // last successful fetch, shown through transient blips
+    var lastFetchAt: Date?   // for debouncing menu-open refreshes
 
     func applicationDidFinishLaunching(_ note: Notification) {
         statusItem.button?.title = "C …"
@@ -187,9 +191,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    func menuWillOpen(_ menu: NSMenu) { refresh() }
+    func menuWillOpen(_ menu: NSMenu) { refresh(force: false) }
 
-    func refresh() {
+    func refresh(force: Bool = true) {
+        // Avoid hammering the endpoint (which 429s): skip a non-forced refresh
+        // that lands within 30s of the previous fetch.
+        if !force, let last = lastFetchAt, Date().timeIntervalSince(last) < 30 { return }
+        lastFetchAt = Date()
         fetchUsage { [weak self] result in
             DispatchQueue.main.async { self?.apply(result) }
         }
@@ -197,16 +205,28 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func apply(_ result: FetchResult) {
         switch result {
-        case .authError:
-            setTitle("⚠ auth", warn: true)
-            rebuildMenu(rows: ["Token expired or rejected.",
-                               "Open Claude Code to refresh your login."], footer: nil)
-        case .error(let msg):
-            setTitle("⚠", warn: true)
-            rebuildMenu(rows: ["Couldn't fetch usage:", msg], footer: nil)
         case .ok(let u):
+            lastUsage = u
             lastUpdated = Date()
             renderUsage(u)
+        case .authError:
+            setTitle("⚠ auth", warn: true)
+            rebuildMenu(rows: ["Login expired or rejected.",
+                               "Reopen Claude Code to refresh your login."],
+                        footer: nil, link: "Open claude.ai/settings/usage ↗")
+        case .transient(let msg):
+            // Temporary blip (e.g. rate-limited): keep the last good bars if we have them.
+            if let u = lastUsage {
+                renderUsage(u)
+            } else {
+                setTitle("⚠", warn: true)
+                rebuildMenu(rows: ["Usage API busy (\(msg)).", "Will retry shortly."],
+                            footer: nil, link: "Open claude.ai/settings/usage ↗")
+            }
+        case .error(let msg):
+            setTitle("⚠", warn: true)
+            rebuildMenu(rows: ["Couldn't fetch usage (\(msg))."],
+                        footer: nil, link: "Open claude.ai/settings/usage ↗")
         }
     }
 
@@ -283,7 +303,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    func rebuildMenu(rows: [String], footer: String?) {
+    func rebuildMenu(rows: [String], footer: String?, link: String? = nil) {
         menu.removeAllItems()
 
         let header = NSMenuItem(title: "Claude Usage", action: nil, keyEquivalent: "")
@@ -300,6 +320,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 .font: monoFont,
                 .foregroundColor: NSColor.labelColor])
             menu.addItem(item)
+        }
+
+        if let link = link {
+            let linkItem = NSMenuItem(title: link, action: #selector(openSettings), keyEquivalent: "")
+            linkItem.target = self
+            linkItem.attributedTitle = NSAttributedString(string: link, attributes: [
+                .foregroundColor: NSColor.linkColor,
+                .font: NSFont.systemFont(ofSize: 12)])
+            menu.addItem(linkItem)
         }
 
         menu.addItem(.separator())

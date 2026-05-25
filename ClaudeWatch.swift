@@ -7,9 +7,9 @@ let KEYCHAIN_SERVICE = "Claude Code-credentials"
 let REFRESH_INTERVAL: TimeInterval = 300  // 5 minutes
 // extra_usage dollar amounts come back in cents; divide to get dollars.
 let CENTS_PER_DOLLAR = 100.0
-// Bar fill is dark yellow normally, switching to red once a window passes this %.
+// Bar fill is yellow normally, switching to red once a window passes this %.
 let WARN_THRESHOLD = 60.0
-let NORMAL_COLOR = NSColor(calibratedRed: 0.72, green: 0.58, blue: 0.0, alpha: 1.0)  // dark yellow
+let NORMAL_COLOR = NSColor(calibratedRed: 0.95, green: 0.78, blue: 0.0, alpha: 1.0)  // yellow
 let WARN_COLOR = NSColor.systemRed
 
 // MARK: - Models
@@ -101,17 +101,42 @@ let isoParserNoFrac: ISO8601DateFormatter = {
     return f
 }()
 
+/// The real local time zone. Launchd-spawned agents don't reliably inherit the
+/// system zone (TimeZone.current can come back as GMT), so read it straight from
+/// the /etc/localtime symlink and only fall back to TimeZone.current.
+let localZone: TimeZone = {
+    if let target = try? FileManager.default.destinationOfSymbolicLink(atPath: "/etc/localtime"),
+       let range = target.range(of: "zoneinfo/") {
+        let id = String(target[range.upperBound...])
+        if let tz = TimeZone(identifier: id) { return tz }
+    }
+    return TimeZone.current
+}()
+
+/// Calendar pinned to the real local zone (for today/tomorrow comparisons).
+let localCalendar: Calendar = {
+    var c = Calendar.current
+    c.timeZone = localZone
+    return c
+}()
+
+/// A DateFormatter pinned to the real local zone.
+func localFormatter(_ fmt: String) -> DateFormatter {
+    let f = DateFormatter()
+    f.timeZone = localZone
+    f.dateFormat = fmt
+    return f
+}
+
 func formatReset(_ iso: String?) -> String {
     guard let iso = iso else { return "" }
     guard let date = isoParser.date(from: iso) ?? isoParserNoFrac.date(from: iso) else { return "" }
-    let cal = Calendar.current
-    let out = DateFormatter()
-    if cal.isDateInToday(date) {
-        out.dateFormat = "h:mm a"; return "today \(out.string(from: date))"
-    } else if cal.isDateInTomorrow(date) {
-        out.dateFormat = "h:mm a"; return "tomorrow \(out.string(from: date))"
+    if localCalendar.isDateInToday(date) {
+        return "today \(localFormatter("h:mm a").string(from: date))"
+    } else if localCalendar.isDateInTomorrow(date) {
+        return "tomorrow \(localFormatter("h:mm a").string(from: date))"
     } else {
-        out.dateFormat = "EEE h:mm a"; return out.string(from: date)
+        return localFormatter("EEE h:mm a").string(from: date)
     }
 }
 
@@ -132,7 +157,7 @@ func countdown(_ iso: String?) -> String {
 /// Two vertical "flood bars" (session, weekly) that fill from the bottom in red.
 func makeBarsImage(_ a: Double, _ b: Double) -> NSImage {
     let w: CGFloat = 20, h: CGFloat = 14
-    let barW: CGFloat = 6.5, gap: CGFloat = 3, radius: CGFloat = 1.25
+    let barW: CGFloat = 7.8, gap: CGFloat = 3, radius: CGFloat = 1.25
     let total = barW * 2 + gap
     let startX = (w - total) / 2
     let img = NSImage(size: NSSize(width: w, height: h), flipped: false) { _ in
@@ -141,7 +166,7 @@ func makeBarsImage(_ a: Double, _ b: Double) -> NSImage {
         for (i, x) in xs.enumerated() {
             let track = NSBezierPath(roundedRect: NSRect(x: x, y: 0, width: barW, height: h),
                                      xRadius: radius, yRadius: radius)
-            NSColor.gray.withAlphaComponent(0.35).setFill()
+            NSColor.black.withAlphaComponent(0.85).setFill()
             track.fill()
             let pct = max(0, min(100, vals[i])) / 100.0
             let fillH = h * CGFloat(pct)
@@ -151,12 +176,6 @@ func makeBarsImage(_ a: Double, _ b: Double) -> NSImage {
                 (vals[i] >= WARN_THRESHOLD ? WARN_COLOR : NORMAL_COLOR).setFill()
                 fill.fill()
             }
-            // Thin white outline so the bar's extent is visible.
-            let outline = NSBezierPath(roundedRect: NSRect(x: x + 0.4, y: 0.4, width: barW - 0.8, height: h - 0.8),
-                                       xRadius: radius, yRadius: radius)
-            outline.lineWidth = 0.8
-            NSColor.white.setStroke()
-            outline.stroke()
         }
         return true
     }
@@ -259,7 +278,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         setBars(five: u.five_hour?.utilization ?? 0, weekly: u.seven_day?.utilization ?? 0)
 
         let footer = lastUpdated.map { d -> String in
-            let f = DateFormatter(); f.dateFormat = "h:mm a"
+            let f = localFormatter("h:mm a")
             return "Updated \(f.string(from: d))"
         }
         rebuildMenu(rows: rows, footer: footer)

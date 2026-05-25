@@ -19,6 +19,12 @@ rm -rf "$DEST/$APP"
 cp -R "$DIR/build/$APP" "$DEST/$APP"
 EXEC="$DEST/$APP/Contents/MacOS/claude-watch"
 
+# Record this source checkout in the installed bundle so the app can self-update
+# (git fetch/pull from here using the user's existing git auth).
+PLIST_INFO="$DEST/$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :CWSourcePath string $DIR" "$PLIST_INFO" 2>/dev/null \
+  || /usr/libexec/PlistBuddy -c "Set :CWSourcePath $DIR" "$PLIST_INFO"
+
 # 3. Write LaunchAgent plist
 mkdir -p "$HOME/Library/LaunchAgents"
 cat > "$PLIST" <<EOF

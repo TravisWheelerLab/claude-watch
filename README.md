@@ -83,6 +83,25 @@ launchctl bootout gui/$(id -u)/com.traviswheeler.claudewatch
 rm -rf ~/Applications/ClaudeWatch.app ~/Library/LaunchAgents/com.traviswheeler.claudewatch.plist
 ```
 
+## Updating
+
+The widget checks for a new version on its own (at launch, every few hours, and
+when you open the menu). When the checkout it was installed from is behind
+`origin`, the dropdown shows a green **⬆ Update available** item — click it to
+pull, rebuild, and relaunch in place. The check uses your existing git/SSH
+access, so it needs no extra token even though the repo is private. The current
+version is shown at the bottom of the menu.
+
+You can also update by hand at any time:
+
+```sh
+./update.sh        # git pull --ff-only + ./install.sh
+```
+
+> `install.sh` records the path of the source checkout in the installed app
+> bundle (`CWSourcePath` in `Info.plist`) so the app knows where to pull from —
+> keep that checkout around for self-update to work.
+
 ## License
 
 BSD 3-Clause — see [LICENSE](LICENSE).

@@ -1,6 +1,7 @@
 import Cocoa
 
 // MARK: - Config
+let APP_VERSION = "0.2"
 let USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 let SETTINGS_URL = "https://claude.ai/settings/usage"
 let KEYCHAIN_SERVICE = "Claude Code-credentials"
@@ -183,6 +184,61 @@ func makeBarsImage(_ a: Double, _ b: Double) -> NSImage {
     return img
 }
 
+// MARK: - Self-update
+// The app is built from a git checkout; install.sh records that checkout's path
+// in the bundle's Info.plist (CWSourcePath). We fetch from there with the user's
+// existing git/SSH auth — no GitHub token needed for the private repo.
+
+/// Path to the source checkout, recorded in Info.plist by install.sh.
+func sourceRepoPath() -> String? {
+    Bundle.main.object(forInfoDictionaryKey: "CWSourcePath") as? String
+}
+
+/// Run a command, capturing combined stdout/stderr. Returns (status, output).
+@discardableResult
+func runCommand(_ launchPath: String, _ args: [String]) -> (Int32, String) {
+    let p = Process()
+    p.launchPath = launchPath
+    p.arguments = args
+    let out = Pipe()
+    p.standardOutput = out
+    p.standardError = out
+    do { try p.run() } catch { return (-1, "") }
+    let data = out.fileHandleForReading.readDataToEndOfFile()
+    p.waitUntilExit()
+    return (p.terminationStatus, String(data: data, encoding: .utf8) ?? "")
+}
+
+struct UpdateInfo { let version: String }
+
+/// Fetch from origin; report a pending update if the checkout is behind upstream.
+/// The version string is the latest reachable tag, else a commit count. Returns
+/// nil if up to date, not a tracked git checkout, or the path is unknown.
+func checkForUpdate() -> UpdateInfo? {
+    guard let repo = sourceRepoPath() else { return nil }
+    let git = "/usr/bin/git"
+    guard FileManager.default.fileExists(atPath: git) else { return nil }
+    _ = runCommand(git, ["-C", repo, "fetch", "--tags", "--quiet"])  // best-effort; ignore net errors
+    let (st, out) = runCommand(git, ["-C", repo, "rev-list", "--count", "HEAD..@{u}"])
+    guard st == 0,
+          let behind = Int(out.trimmingCharacters(in: .whitespacesAndNewlines)),
+          behind > 0 else { return nil }
+    let (tst, tout) = runCommand(git, ["-C", repo, "describe", "--tags", "--abbrev=0", "@{u}"])
+    let tag = tout.trimmingCharacters(in: .whitespacesAndNewlines)
+    let version = (tst == 0 && !tag.isEmpty) ? tag : "\(behind) new commit\(behind == 1 ? "" : "s")"
+    return UpdateInfo(version: version)
+}
+
+/// Launch update.sh detached (nohup) so it survives this process being
+/// relaunched by the LaunchAgent during the rebuild.
+func launchUpdate() {
+    guard let repo = sourceRepoPath() else { return }
+    let p = Process()
+    p.launchPath = "/bin/sh"
+    p.arguments = ["-c", "nohup '\(repo)/update.sh' > /tmp/claude-watch-update.log 2>&1 &"]
+    try? p.run()
+}
+
 // MARK: - App
 class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -193,6 +249,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var fiveReset: String?   // ISO8601 of next 5h reset, for the countdown
     var lastUsage: Usage?    // last successful fetch, shown through transient blips
     var lastFetchAt: Date?   // for debouncing menu-open refreshes
+    var updateInfo: UpdateInfo?       // set when a newer version is available
+    var updateTimer: Timer?
+    var lastUpdateCheckAt: Date?      // for debouncing update checks
 
     func applicationDidFinishLaunching(_ note: Notification) {
         statusItem.button?.title = "C …"
@@ -208,9 +267,33 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         minuteTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             self?.updateCountdownText()
         }
+        // Check for a new version at launch, then every 6 hours.
+        runUpdateCheck()
+        updateTimer = Timer.scheduledTimer(withTimeInterval: 6 * 3600, repeats: true) { [weak self] _ in
+            self?.runUpdateCheck()
+        }
     }
 
-    func menuWillOpen(_ menu: NSMenu) { refresh(force: false) }
+    func menuWillOpen(_ menu: NSMenu) {
+        refresh(force: false)
+        // Opportunistic update check, at most every 30 min (runs async; no UI lag).
+        if lastUpdateCheckAt == nil || Date().timeIntervalSince(lastUpdateCheckAt!) > 1800 {
+            runUpdateCheck()
+        }
+    }
+
+    /// Check for an update off the main thread (git fetch hits the network), then
+    /// refresh the menu so the "Update available" item appears/disappears.
+    func runUpdateCheck() {
+        lastUpdateCheckAt = Date()
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let info = checkForUpdate()
+            DispatchQueue.main.async {
+                self?.updateInfo = info
+                if let u = self?.lastUsage { self?.renderUsage(u) }
+            }
+        }
+    }
 
     func refresh(force: Bool = true) {
         // Avoid hammering the endpoint (which 429s): skip a non-forced refresh
@@ -350,6 +433,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(linkItem)
         }
 
+        if let up = updateInfo {
+            menu.addItem(.separator())
+            let title = "⬆ Update available (\(up.version))"
+            let upItem = NSMenuItem(title: title, action: #selector(updateClicked), keyEquivalent: "")
+            upItem.target = self
+            upItem.attributedTitle = NSAttributedString(string: title, attributes: [
+                .foregroundColor: NSColor.systemGreen,
+                .font: NSFont.boldSystemFont(ofSize: 12)])
+            menu.addItem(upItem)
+        }
+
         menu.addItem(.separator())
         if let footer = footer {
             let f = NSMenuItem(title: footer, action: nil, keyEquivalent: "")
@@ -366,6 +460,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(openItem)
 
         menu.addItem(.separator())
+        let verStr = "ClaudeWatch v\(APP_VERSION)"
+        let ver = NSMenuItem(title: verStr, action: nil, keyEquivalent: "")
+        ver.attributedTitle = NSAttributedString(string: verStr, attributes: [
+            .foregroundColor: NSColor.tertiaryLabelColor,
+            .font: NSFont.systemFont(ofSize: 11)])
+        menu.addItem(ver)
         let quit = NSMenuItem(title: "Quit ClaudeWatch", action: #selector(quitClicked), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
@@ -374,6 +474,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func refreshClicked() { refresh() }
     @objc func openSettings() { NSWorkspace.shared.open(URL(string: SETTINGS_URL)!) }
     @objc func quitClicked() { NSApp.terminate(nil) }
+
+    @objc func updateClicked() {
+        let alert = NSAlert()
+        alert.messageText = "Update ClaudeWatch?"
+        alert.informativeText = "This pulls the latest source, rebuilds, and relaunches the app."
+            + (updateInfo.map { "\n\nAvailable: \($0.version)" } ?? "")
+        alert.addButton(withTitle: "Update")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn { launchUpdate() }
+    }
 }
 
 let app = NSApplication.shared

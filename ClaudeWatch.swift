@@ -1,7 +1,7 @@
 import Cocoa
 
 // MARK: - Config
-let APP_VERSION = "0.2"
+let APP_VERSION = "0.3"
 let USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 let SETTINGS_URL = "https://claude.ai/settings/usage"
 let KEYCHAIN_SERVICE = "Claude Code-credentials"
@@ -102,24 +102,26 @@ let isoParserNoFrac: ISO8601DateFormatter = {
     return f
 }()
 
-/// The real local time zone. Launchd-spawned agents don't reliably inherit the
-/// system zone (TimeZone.current can come back as GMT), so read it straight from
-/// the /etc/localtime symlink and only fall back to TimeZone.current.
-let localZone: TimeZone = {
+/// The real local time zone, re-resolved on every call. Launchd-spawned agents
+/// don't reliably inherit the system zone (TimeZone.current can come back as
+/// GMT), so read it straight from the /etc/localtime symlink. Re-resolving
+/// dynamically also picks up DST/zone changes without restarting the agent, and
+/// recovers if the symlink read transiently failed at startup.
+var localZone: TimeZone {
     if let target = try? FileManager.default.destinationOfSymbolicLink(atPath: "/etc/localtime"),
        let range = target.range(of: "zoneinfo/") {
         let id = String(target[range.upperBound...])
         if let tz = TimeZone(identifier: id) { return tz }
     }
     return TimeZone.current
-}()
+}
 
 /// Calendar pinned to the real local zone (for today/tomorrow comparisons).
-let localCalendar: Calendar = {
+var localCalendar: Calendar {
     var c = Calendar.current
     c.timeZone = localZone
     return c
-}()
+}
 
 /// A DateFormatter pinned to the real local zone.
 func localFormatter(_ fmt: String) -> DateFormatter {

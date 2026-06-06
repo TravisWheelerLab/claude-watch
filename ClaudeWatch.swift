@@ -75,14 +75,47 @@ func fetchUsage(_ completion: @escaping (FetchResult) -> Void) {
     req.timeoutInterval = 20
     req.cachePolicy = .reloadIgnoringLocalCacheData
     URLSession.shared.dataTask(with: req) { data, resp, err in
-        if let err = err { completion(.transient(err.localizedDescription)); return }
+        if let err = err {
+            logTransient("network: \(err.localizedDescription)")
+            completion(.transient("network: \(err.localizedDescription)")); return
+        }
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
         if code == 401 || code == 403 { completion(.authError); return }
-        if code == 429 || (500...599).contains(code) { completion(.transient("HTTP \(code)")); return }
-        guard code == 200, let data = data else { completion(.error("HTTP \(code)")); return }
+        if code == 429 {
+            logTransient("HTTP 429 rate-limited")
+            completion(.transient("rate-limited (HTTP 429)")); return
+        }
+        if (500...599).contains(code) {
+            logTransient("HTTP \(code) server error")
+            completion(.transient("server (HTTP \(code))")); return
+        }
+        guard code == 200, let data = data else {
+            logTransient("HTTP \(code) unexpected")
+            completion(.error("HTTP \(code)")); return
+        }
         do { completion(.ok(try JSONDecoder().decode(Usage.self, from: data))) }
         catch { completion(.error("parse error")) }
     }.resume()
+}
+
+/// Append a one-line transient-error record to /tmp/claude-watch-fetch.log so we
+/// can tell after the fact whether "API busy" was a real 429 or a local network
+/// blip. The file is bounded to ~64 KB; older lines are dropped when it grows.
+func logTransient(_ msg: String) {
+    let ts = ISO8601DateFormatter().string(from: Date())
+    let line = "[\(ts)] \(msg)\n"
+    guard let data = line.data(using: .utf8) else { return }
+    let url = URL(fileURLWithPath: "/tmp/claude-watch-fetch.log")
+    if let h = try? FileHandle(forWritingTo: url) {
+        defer { try? h.close() }
+        if (try? h.seekToEnd()) ?? 0 > 65_536 {
+            try? h.seek(toOffset: 0)
+            try? h.truncate(atOffset: 0)
+        }
+        h.write(data)
+    } else {
+        try? data.write(to: url)
+    }
 }
 
 // MARK: - Formatting helpers
@@ -319,12 +352,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                "Reopen Claude Code to refresh your login."],
                         footer: nil, link: "Open claude.ai/settings/usage ↗")
         case .transient(let msg):
-            // Temporary blip (e.g. rate-limited): keep the last good bars if we have them.
+            // Temporary blip (rate-limit, server, or local network): keep the last good bars if we have them.
             if let u = lastUsage {
                 renderUsage(u)
             } else {
                 setTitle("⚠", warn: true)
-                rebuildMenu(rows: ["Usage API busy (\(msg)).", "Will retry shortly."],
+                rebuildMenu(rows: ["Couldn't reach usage API: \(msg).", "Will retry shortly."],
                             footer: nil, link: "Open claude.ai/settings/usage ↗")
             }
         case .error(let msg):

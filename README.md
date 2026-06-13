@@ -12,20 +12,18 @@ right = rolling 7-day weekly) that fill from the bottom as usage grows — dark
 yellow normally, switching to red once a window passes 60% — plus a compact
 countdown (e.g. `2h33m`) to the next 5-hour reset.
 
+Here it is sitting in the menu bar:
+
+![claude-watch in the menu bar](figures/menu_tool.png)
+
+The tall **red** bar on the left shows that I've used a large part of my limit
+for the current 5-hour window (which resets in 1 hour and 10 minutes — the
+`1h10m` countdown beside it). The tiny **yellow** bar (the rolling 7-day
+weekly window) shows that I've used almost none of my weekly limit.
+
 Click it for a dropdown with the exact figures:
 
-```
-Claude Usage
-─────────────────────────────────────────
-Session 5h      8%  █░░░░░░░░░  ↻ today 6:10 PM
-Weekly 7d      73%  ███████░░░  ↻ Tue 6:00 AM
-Extra spend    34%  ███░░░░░░░  $13.50/$40.00
-─────────────────────────────────────────
-Updated 2:20 PM
-Refresh now            ⌘R
-Open usage page…
-Quit
-```
+![claude-watch dropdown](figures/claudewatch-popup.png)
 
 It refreshes every 5 minutes and on each click; the countdown ticks every
 minute. The icon adapts to the menu bar; the title turns into a warning if the

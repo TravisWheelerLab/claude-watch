@@ -21,9 +21,9 @@ for the current 5-hour window (which resets in 1 hour and 10 minutes — the
 `1h10m` countdown beside it). The tiny **yellow** bar (the rolling 7-day
 weekly window) shows that I've used almost none of my weekly limit.
 
-Click it for a dropdown with the exact figures:
+Click it for a popup with the exact figures:
 
-![claude-watch dropdown](figures/claudewatch-popup.png)
+<img src="figures/claudewatch-popup.png" alt="claude-watch popup" width="50%">
 
 It refreshes every 5 minutes and on each click; the countdown ticks every
 minute. The icon adapts to the menu bar; the title turns into a warning if the
@@ -85,7 +85,7 @@ rm -rf ~/Applications/ClaudeWatch.app ~/Library/LaunchAgents/com.traviswheeler.c
 
 The widget checks for a new version on its own (at launch, every few hours, and
 when you open the menu). When the checkout it was installed from is behind
-`origin`, the dropdown shows a green **⬆ Update available** item — click it to
+`origin`, the popup shows a green **⬆ Update available** item — click it to
 pull, rebuild, and relaunch in place. The check uses your existing git/SSH
 access, so it needs no extra token even though the repo is private. The current
 version is shown at the bottom of the menu.

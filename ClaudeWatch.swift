@@ -1,7 +1,7 @@
 import Cocoa
 
 // MARK: - Config
-let APP_VERSION = "0.3"
+let APP_VERSION = "0.4"
 let USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 let SETTINGS_URL = "https://claude.ai/settings/usage"
 let KEYCHAIN_SERVICE = "Claude Code-credentials"
@@ -65,7 +65,7 @@ func readAccessToken() -> String? {
 // MARK: - Fetch
 func fetchUsage(_ completion: @escaping (FetchResult) -> Void) {
     guard let token = readAccessToken() else {
-        completion(.error("No token in keychain")); return
+        completion(.authError); return   // no token = not logged in; same /login fix
     }
     var req = URLRequest(url: URL(string: USAGE_URL)!)
     req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -347,10 +347,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             lastUpdated = Date()
             renderUsage(u)
         case .authError:
-            setTitle("⚠ auth", warn: true)
-            rebuildMenu(rows: ["Login expired or rejected.",
-                               "Reopen Claude Code to refresh your login."],
-                        footer: nil, link: "Open claude.ai/settings/usage ↗")
+            setTitle("⚠ login", warn: true)
+            rebuildMenu(rows: ["Claude login expired or rejected.",
+                               "Click below to sign in again."],
+                        footer: nil, link: "Open claude.ai/settings/usage ↗",
+                        login: true)
         case .transient(let msg):
             // Temporary blip (rate-limit, server, or local network): keep the last good bars if we have them.
             if let u = lastUsage {
@@ -440,7 +441,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    func rebuildMenu(rows: [String], footer: String?, link: String? = nil) {
+    func rebuildMenu(rows: [String], footer: String?, link: String? = nil, login: Bool = false) {
         menu.removeAllItems()
 
         let header = NSMenuItem(title: "Claude Usage", action: nil, keyEquivalent: "")
@@ -457,6 +458,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 .font: monoFont,
                 .foregroundColor: NSColor.labelColor])
             menu.addItem(item)
+        }
+
+        if login {
+            let title = "🔑 Log in to Claude…"
+            let loginItem = NSMenuItem(title: title, action: #selector(loginClicked), keyEquivalent: "")
+            loginItem.target = self
+            loginItem.attributedTitle = NSAttributedString(string: title, attributes: [
+                .foregroundColor: NSColor.linkColor,
+                .font: NSFont.boldSystemFont(ofSize: 12)])
+            menu.addItem(loginItem)
         }
 
         if let link = link {
@@ -508,6 +519,27 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func refreshClicked() { refresh() }
     @objc func openSettings() { NSWorkspace.shared.open(URL(string: SETTINGS_URL)!) }
+
+    /// Open Terminal and run `claude auth login` so the user can refresh the
+    /// expired OAuth token (the browser flow writes a fresh one to the keychain).
+    /// Runs in a visible Terminal because login is interactive (browser + prompts);
+    /// we then auto-refresh once on a short delay to pick up the new token.
+    @objc func loginClicked() {
+        let osa = """
+        tell application "Terminal"
+            activate
+            do script "claude auth login"
+        end tell
+        """
+        let p = Process()
+        p.launchPath = "/usr/bin/osascript"
+        p.arguments = ["-e", osa]
+        try? p.run()
+        // Give the user time to complete the browser flow, then re-fetch.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 25) { [weak self] in
+            self?.refresh()
+        }
+    }
     @objc func quitClicked() { NSApp.terminate(nil) }
 
     @objc func updateClicked() {

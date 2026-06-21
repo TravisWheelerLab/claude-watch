@@ -27,7 +27,11 @@ Click it for a popup with the exact figures:
 
 It refreshes every 5 minutes and on each click; the countdown ticks every
 minute. The icon adapts to the menu bar; the title turns into a warning if the
-usage data can't be fetched.
+usage data can't be fetched. If your Claude login has expired, it shows a red
+**⚠ login**; the popup then offers a **🔑 Log in to Claude…** item that opens a
+Terminal running `claude auth login`, refreshing the keychain token in place
+(reopening the app alone won't — it just re-reads whatever token is already
+there).
 
 ## How it works
 

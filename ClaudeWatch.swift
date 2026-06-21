@@ -1,11 +1,14 @@
 import Cocoa
 
 // MARK: - Config
-let APP_VERSION = "0.4"
+let APP_VERSION = "0.5"
 let USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 let SETTINGS_URL = "https://claude.ai/settings/usage"
 let KEYCHAIN_SERVICE = "Claude Code-credentials"
 let REFRESH_INTERVAL: TimeInterval = 300  // 5 minutes
+// When the OAuth token is within this many minutes of expiring, the popup warns
+// and offers the login button proactively — before fetches start failing.
+let EXPIRY_WARN_MINUTES = 60.0
 // extra_usage dollar amounts come back in cents; divide to get dollars.
 let CENTS_PER_DOLLAR = 100.0
 // Bar fill is yellow normally, switching to red once a window passes this %.
@@ -41,9 +44,15 @@ enum FetchResult {
 }
 
 // MARK: - Keychain
-/// Reads the Claude Code OAuth access token from the login keychain by
-/// shelling out to `security` (the access path we verified works).
-func readAccessToken() -> String? {
+struct Credentials {
+    let accessToken: String
+    let expiresAt: Date?   // when the access token stops working
+}
+
+/// Reads the Claude Code OAuth credentials from the login keychain by shelling
+/// out to `security` (the access path we verified works). Returns the access
+/// token plus its expiry (from the `expiresAt` field, a Unix-millis timestamp).
+func readCredentials() -> Credentials? {
     let p = Process()
     p.launchPath = "/usr/bin/security"
     p.arguments = ["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"]
@@ -59,14 +68,13 @@ func readAccessToken() -> String? {
     guard let d = blob.data(using: .utf8),
           let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return nil }
     let oauth = (obj["claudeAiOauth"] as? [String: Any]) ?? obj
-    return oauth["accessToken"] as? String
+    guard let token = oauth["accessToken"] as? String else { return nil }
+    let expiry = (oauth["expiresAt"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) }
+    return Credentials(accessToken: token, expiresAt: expiry)
 }
 
 // MARK: - Fetch
-func fetchUsage(_ completion: @escaping (FetchResult) -> Void) {
-    guard let token = readAccessToken() else {
-        completion(.authError); return   // no token = not logged in; same /login fix
-    }
+func fetchUsage(token: String, _ completion: @escaping (FetchResult) -> Void) {
     var req = URLRequest(url: URL(string: USAGE_URL)!)
     req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
     req.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
@@ -284,6 +292,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var fiveReset: String?   // ISO8601 of next 5h reset, for the countdown
     var lastUsage: Usage?    // last successful fetch, shown through transient blips
     var lastFetchAt: Date?   // for debouncing menu-open refreshes
+    var tokenExpiry: Date?   // OAuth access-token expiry, for the proactive warning
     var updateInfo: UpdateInfo?       // set when a newer version is available
     var updateTimer: Timer?
     var lastUpdateCheckAt: Date?      // for debouncing update checks
@@ -335,7 +344,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // that lands within 30s of the previous fetch.
         if !force, let last = lastFetchAt, Date().timeIntervalSince(last) < 30 { return }
         lastFetchAt = Date()
-        fetchUsage { [weak self] result in
+        guard let creds = readCredentials() else {
+            tokenExpiry = nil
+            apply(.authError)   // no token = not logged in; same login fix
+            return
+        }
+        tokenExpiry = creds.expiresAt
+        fetchUsage(token: creds.accessToken) { [weak self] result in
             DispatchQueue.main.async { self?.apply(result) }
         }
     }
@@ -392,6 +407,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         if rows.isEmpty { rows = ["No active usage windows"] }
 
+        // Proactively warn while the login still works but is about to expire,
+        // so the user can refresh before fetches start failing.
+        var loginSoon = false
+        if let exp = tokenExpiry {
+            let mins = exp.timeIntervalSinceNow / 60
+            if mins > 0 && mins < EXPIRY_WARN_MINUTES {
+                rows.append("")
+                rows.append("⚠ Login expires in \(Int(mins.rounded()))m — sign in soon")
+                loginSoon = true
+            }
+        }
+
         // Menu-bar icon = two vertical flood bars (session 5h, weekly 7d) + 5h countdown.
         fiveReset = u.five_hour?.resets_at
         setBars(five: u.five_hour?.utilization ?? 0, weekly: u.seven_day?.utilization ?? 0)
@@ -400,7 +427,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let f = localFormatter("h:mm a")
             return "Updated \(f.string(from: d))"
         }
-        rebuildMenu(rows: rows, footer: footer)
+        rebuildMenu(rows: rows, footer: footer, login: loginSoon)
     }
 
     func setBars(five: Double, weekly: Double) {

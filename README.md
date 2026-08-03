@@ -25,9 +25,14 @@ Click it for a popup with the exact figures:
 
 <img src="figures/claudewatch-popup.png" alt="claude-watch popup" width="50%">
 
-It refreshes every 5 minutes and on each click; the countdown ticks every
-minute. The icon adapts to the menu bar; the title turns into a warning if the
-usage data can't be fetched. As your Claude login nears expiry the popup warns
+It refreshes in the background every 15 minutes and whenever you open the menu;
+the countdown ticks every minute. The usage endpoint shares a small rate-limit
+bucket with Claude Code and anything else using the same login, so on an
+HTTP 429 the widget backs off (exponentially, up to an hour) instead of hammering
+it, and marks the displayed figures **⚠ API busy — last good HH:MM** once they
+go stale rather than passing them off as current. The icon adapts to the menu
+bar; the title turns into a warning if the usage data can't be fetched. As your
+Claude login nears expiry the popup warns
 (**⚠ Login expires in NNm**) while it still works; once it has expired the menu
 bar shows a red **⚠ login**. In both cases the popup offers a **🔑 Log in to
 Claude…** item that opens a Terminal running `claude auth login`, refreshing the

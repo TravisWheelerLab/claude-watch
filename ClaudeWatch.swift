@@ -1,11 +1,20 @@
 import Cocoa
 
 // MARK: - Config
-let APP_VERSION = "0.5"
+let APP_VERSION = "0.6"
 let USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 let SETTINGS_URL = "https://claude.ai/settings/usage"
 let KEYCHAIN_SERVICE = "Claude Code-credentials"
-let REFRESH_INTERVAL: TimeInterval = 300  // 5 minutes
+// The usage endpoint shares a small (~5-request) rate-limit bucket with Claude
+// Code and everything else using the same OAuth token, so poll gently in the
+// background — opening the menu triggers an on-demand refresh when it matters.
+let REFRESH_INTERVAL: TimeInterval = 900  // 15 minutes
+// After a 429, wait at least this long before the next automatic poll, doubling
+// per consecutive throttle up to the cap, so the widget stops fighting the limit.
+let BACKOFF_MIN: TimeInterval = 15 * 60
+let BACKOFF_MAX: TimeInterval = 60 * 60
+// Shown data older than this (because fetches keep failing) is flagged stale.
+let STALE_AFTER: TimeInterval = 20 * 60
 // When the OAuth token is within this many minutes of expiring, the popup warns
 // and offers the login button proactively — before fetches start failing.
 let EXPIRY_WARN_MINUTES = 60.0
@@ -293,6 +302,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var lastUsage: Usage?    // last successful fetch, shown through transient blips
     var lastFetchAt: Date?   // for debouncing menu-open refreshes
     var tokenExpiry: Date?   // OAuth access-token expiry, for the proactive warning
+    var throttleStreak = 0   // consecutive 429s, for exponential backoff
+    var backoffUntil: Date?  // no automatic polling before this time (after a 429)
     var updateInfo: UpdateInfo?       // set when a newer version is available
     var updateTimer: Timer?
     var lastUpdateCheckAt: Date?      // for debouncing update checks
@@ -305,7 +316,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         rebuildMenu(rows: ["Loading…"], footer: "Fetching…")
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: REFRESH_INTERVAL, repeats: true) { [weak self] _ in
-            self?.refresh()
+            self?.refresh(force: false)   // automatic poll: respects backoff after 429s
         }
         // Tick the countdown text every minute without re-fetching.
         minuteTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
@@ -340,9 +351,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func refresh(force: Bool = true) {
-        // Avoid hammering the endpoint (which 429s): skip a non-forced refresh
-        // that lands within 30s of the previous fetch.
-        if !force, let last = lastFetchAt, Date().timeIntervalSince(last) < 30 { return }
+        // Automatic polls (force == false) back off after 429s and debounce;
+        // user-initiated ones (Refresh now, post-login) always go through.
+        if !force {
+            if let until = backoffUntil, Date() < until { return }
+            if let last = lastFetchAt, Date().timeIntervalSince(last) < 30 { return }
+        }
         lastFetchAt = Date()
         guard let creds = readCredentials() else {
             tokenExpiry = nil
@@ -358,6 +372,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func apply(_ result: FetchResult) {
         switch result {
         case .ok(let u):
+            throttleStreak = 0
+            backoffUntil = nil
             lastUsage = u
             lastUpdated = Date()
             renderUsage(u)
@@ -368,9 +384,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         footer: nil, link: "Open claude.ai/settings/usage ↗",
                         login: true)
         case .transient(let msg):
-            // Temporary blip (rate-limit, server, or local network): keep the last good bars if we have them.
+            // Rate-limited: back off (doubling per consecutive 429, capped) so we
+            // stop draining the shared bucket and let it refill.
+            if msg.contains("429") {
+                throttleStreak += 1
+                let wait = min(BACKOFF_MAX, BACKOFF_MIN * pow(2, Double(throttleStreak - 1)))
+                backoffUntil = Date().addingTimeInterval(wait)
+            }
+            // Keep the last good bars if we have them, but flag them as stale.
             if let u = lastUsage {
-                renderUsage(u)
+                renderUsage(u, stale: true)
             } else {
                 setTitle("⚠", warn: true)
                 rebuildMenu(rows: ["Couldn't reach usage API: \(msg).", "Will retry shortly."],
@@ -383,7 +406,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    func renderUsage(_ u: Usage) {
+    func renderUsage(_ u: Usage, stale: Bool = false) {
         var rows: [String] = []
         func add(_ label: String, _ w: UsageWindow?) {
             guard let w = w else { return }
@@ -423,9 +446,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         fiveReset = u.five_hour?.resets_at
         setBars(five: u.five_hour?.utilization ?? 0, weekly: u.seven_day?.utilization ?? 0)
 
-        let footer = lastUpdated.map { d -> String in
+        // Flag the data as stale once it's old and fetches are failing, so the
+        // frozen numbers aren't mistaken for current ones.
+        let old = lastUpdated.map { Date().timeIntervalSince($0) > STALE_AFTER } ?? false
+        var footer = lastUpdated.map { d -> String in
             let f = localFormatter("h:mm a")
             return "Updated \(f.string(from: d))"
+        }
+        if stale && old, let f = footer {
+            footer = "⚠ API busy — last good \(f.replacingOccurrences(of: "Updated ", with: ""))"
         }
         rebuildMenu(rows: rows, footer: footer, login: loginSoon)
     }

@@ -1,10 +1,12 @@
 import Cocoa
 
 // MARK: - Config
-let APP_VERSION = "0.6"
+let APP_VERSION = "0.7"
 let USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 let SETTINGS_URL = "https://claude.ai/settings/usage"
 let KEYCHAIN_SERVICE = "Claude Code-credentials"
+// Some Claude Code installs store credentials in this file instead of the keychain.
+let CREDENTIALS_FILE = "~/.claude/.credentials.json"
 // The usage endpoint shares a small (~5-request) rate-limit bucket with Claude
 // Code and everything else using the same OAuth token, so poll gently in the
 // background — opening the menu triggers an on-demand refresh when it matters.
@@ -52,16 +54,28 @@ enum FetchResult {
     case error(String)
 }
 
-// MARK: - Keychain
+// MARK: - Credentials
+// Claude Code stores its OAuth credentials in one of two places depending on
+// platform/version/config: the macOS login keychain, or ~/.claude/.credentials.json.
+// We read both and use whichever token is fresher, so ClaudeWatch works either way.
 struct Credentials {
     let accessToken: String
     let expiresAt: Date?   // when the access token stops working
 }
 
-/// Reads the Claude Code OAuth credentials from the login keychain by shelling
-/// out to `security` (the access path we verified works). Returns the access
-/// token plus its expiry (from the `expiresAt` field, a Unix-millis timestamp).
-func readCredentials() -> Credentials? {
+/// Parse a Claude Code credentials JSON blob. The shape is the same in the
+/// keychain and the file: an optional `claudeAiOauth` wrapper around
+/// `accessToken` + `expiresAt` (a Unix-millis timestamp).
+func parseCredentials(_ data: Data) -> Credentials? {
+    guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+    let oauth = (obj["claudeAiOauth"] as? [String: Any]) ?? obj
+    guard let token = oauth["accessToken"] as? String, !token.isEmpty else { return nil }
+    let expiry = (oauth["expiresAt"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) }
+    return Credentials(accessToken: token, expiresAt: expiry)
+}
+
+/// Read credentials from the login keychain via `security find-generic-password`.
+func credentialsFromKeychain() -> Credentials? {
     let p = Process()
     p.launchPath = "/usr/bin/security"
     p.arguments = ["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"]
@@ -71,15 +85,26 @@ func readCredentials() -> Credentials? {
     do { try p.run() } catch { return nil }
     let data = out.fileHandleForReading.readDataToEndOfFile()
     p.waitUntilExit()
-    guard p.terminationStatus == 0,
-          let raw = String(data: data, encoding: .utf8) else { return nil }
-    let blob = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard let d = blob.data(using: .utf8),
-          let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return nil }
-    let oauth = (obj["claudeAiOauth"] as? [String: Any]) ?? obj
-    guard let token = oauth["accessToken"] as? String else { return nil }
-    let expiry = (oauth["expiresAt"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) }
-    return Credentials(accessToken: token, expiresAt: expiry)
+    guard p.terminationStatus == 0 else { return nil }   // item not found → nil
+    // `security -w` prints the raw secret (our JSON) followed by a newline.
+    let trimmed = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let json = trimmed?.data(using: .utf8) else { return nil }
+    return parseCredentials(json)
+}
+
+/// Read credentials from ~/.claude/.credentials.json.
+func credentialsFromFile() -> Credentials? {
+    let path = (CREDENTIALS_FILE as NSString).expandingTildeInPath
+    guard let data = FileManager.default.contents(atPath: path) else { return nil }
+    return parseCredentials(data)
+}
+
+/// The current OAuth credentials. Claude Code may use either storage backend, so
+/// read both and prefer whichever token expires later — that way a stale leftover
+/// in one location never shadows a freshly written token in the other.
+func readCredentials() -> Credentials? {
+    let found = [credentialsFromFile(), credentialsFromKeychain()].compactMap { $0 }
+    return found.max { ($0.expiresAt ?? .distantPast) < ($1.expiresAt ?? .distantPast) }
 }
 
 // MARK: - Fetch
@@ -306,6 +331,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var backoffUntil: Date?  // no automatic polling before this time (after a 429)
     var updateInfo: UpdateInfo?       // set when a newer version is available
     var updateTimer: Timer?
+    var loginWaitTimer: Timer?        // polls for a new token after "Log in to Claude…"
     var lastUpdateCheckAt: Date?      // for debouncing update checks
 
     func applicationDidFinishLaunching(_ note: Notification) {
@@ -577,10 +603,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func openSettings() { NSWorkspace.shared.open(URL(string: SETTINGS_URL)!) }
 
     /// Open Terminal and run `claude auth login` so the user can refresh the
-    /// expired OAuth token (the browser flow writes a fresh one to the keychain).
-    /// Runs in a visible Terminal because login is interactive (browser + prompts);
-    /// we then auto-refresh once on a short delay to pick up the new token.
+    /// expired OAuth token (the browser flow writes a fresh one to the credential
+    /// store). Runs in a visible Terminal because login is interactive (browser +
+    /// prompts). The flow can take a while, so instead of guessing a delay we watch
+    /// the local credential store — a cheap keychain/file read, no network — and do
+    /// a single fetch the moment the stored token actually changes.
     @objc func loginClicked() {
+        let oldToken = readCredentials()?.accessToken   // may be nil (never logged in)
         let osa = """
         tell application "Terminal"
             activate
@@ -591,9 +620,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         p.launchPath = "/usr/bin/osascript"
         p.arguments = ["-e", osa]
         try? p.run()
-        // Give the user time to complete the browser flow, then re-fetch.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 25) { [weak self] in
-            self?.refresh()
+
+        loginWaitTimer?.invalidate()
+        let deadline = Date().addingTimeInterval(5 * 60)   // give up after 5 minutes
+        loginWaitTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] t in
+            guard let self = self else { t.invalidate(); return }
+            let current = readCredentials()?.accessToken
+            if let current = current, current != oldToken {
+                t.invalidate(); self.loginWaitTimer = nil
+                self.refresh()   // fresh token in hand → one network fetch (bypasses backoff)
+            } else if Date() > deadline {
+                t.invalidate(); self.loginWaitTimer = nil
+            }
         }
     }
     @objc func quitClicked() { NSApp.terminate(nil) }

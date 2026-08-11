@@ -50,9 +50,11 @@ GET https://api.anthropic.com/api/oauth/usage
 Authorization: Bearer <oauth access token>
 ```
 
-The OAuth access token is read at runtime from the macOS **login keychain**
-(service `Claude Code-credentials`, written there by Claude Code) — it is never
-stored in this project. The JSON response contains `five_hour`, `seven_day`,
+The OAuth access token is read at runtime from wherever Claude Code stored it —
+either the macOS **login keychain** (service `Claude Code-credentials`) or
+**`~/.claude/.credentials.json`**, depending on your Claude Code version and
+platform. ClaudeWatch checks both and uses whichever token is fresher; it never
+stores the token itself. The JSON response contains `five_hour`, `seven_day`,
 per-model windows, and an `extra_usage` block (whose dollar fields are in
 **cents**).
 

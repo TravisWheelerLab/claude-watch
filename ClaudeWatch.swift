@@ -1,7 +1,8 @@
 import Cocoa
+import Network
 
 // MARK: - Config
-let APP_VERSION = "0.7"
+let APP_VERSION = "0.8"
 let USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 let SETTINGS_URL = "https://claude.ai/settings/usage"
 let KEYCHAIN_SERVICE = "Claude Code-credentials"
@@ -122,7 +123,10 @@ func fetchUsage(token: String, _ completion: @escaping (FetchResult) -> Void) {
             completion(.transient("network: \(err.localizedDescription)")); return
         }
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-        if code == 401 || code == 403 { completion(.authError); return }
+        if code == 401 || code == 403 {
+            logTransient("HTTP \(code) auth-rejected (token present but refused)")
+            completion(.authError); return
+        }
         if code == 429 {
             logTransient("HTTP 429 rate-limited")
             completion(.transient("rate-limited (HTTP 429)")); return
@@ -333,6 +337,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var updateTimer: Timer?
     var loginWaitTimer: Timer?        // polls for a new token after "Log in to Claude…"
     var lastUpdateCheckAt: Date?      // for debouncing update checks
+    let pathMonitor = NWPathMonitor() // watches network reachability (laptops drop Wi-Fi)
+    var networkUp = true              // last known network state
+    var authRetries = 0              // quick self-heal attempts after an auth failure
 
     func applicationDidFinishLaunching(_ note: Notification) {
         statusItem.button?.title = "C …"
@@ -340,6 +347,27 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.autoenablesItems = false   // keep info rows full-color, not dimmed
         statusItem.menu = menu
         rebuildMenu(rows: ["Loading…"], footer: "Fetching…")
+
+        // Watch network reachability: don't pester the usage API while offline
+        // (that's what made a dropped Wi-Fi look like a login failure), and fetch
+        // the instant the network comes back instead of waiting for the next poll.
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                let up = path.status == .satisfied
+                let cameBack = up && !self.networkUp
+                self.networkUp = up
+                if !up { self.showOffline() }
+                else if cameBack { self.refresh() }
+            }
+        }
+        pathMonitor.start(queue: DispatchQueue.global(qos: .utility))
+
+        // Re-fetch when the Mac wakes (a laptop's usage is stale after sleep).
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(didWake),
+            name: NSWorkspace.didWakeNotification, object: nil)
+
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: REFRESH_INTERVAL, repeats: true) { [weak self] _ in
             self?.refresh(force: false)   // automatic poll: respects backoff after 429s
@@ -383,9 +411,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if let until = backoffUntil, Date() < until { return }
             if let last = lastFetchAt, Date().timeIntervalSince(last) < 30 { return }
         }
+        // No network: don't hit the API (it would just error and look like a
+        // failure). NWPathMonitor will call us back the moment we're reconnected.
+        if !networkUp { showOffline(); return }
         lastFetchAt = Date()
         guard let creds = readCredentials() else {
             tokenExpiry = nil
+            logTransient("no credentials found (file=\(credentialsFromFile() != nil), keychain=\(credentialsFromKeychain() != nil))")
             apply(.authError)   // no token = not logged in; same login fix
             return
         }
@@ -400,6 +432,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .ok(let u):
             throttleStreak = 0
             backoffUntil = nil
+            authRetries = 0
             lastUsage = u
             lastUpdated = Date()
             renderUsage(u)
@@ -409,6 +442,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                "Click below to sign in again."],
                         footer: nil, link: "Open claude.ai/settings/usage ↗",
                         login: true)
+            // An auth failure can be transient (token mid-rotation, keychain not
+            // ready just after wake). Retry a few times quickly so a blip clears
+            // in seconds instead of lingering until the next 15-min poll; a real
+            // logout just settles back onto the normal cadence.
+            if authRetries < 4 {
+                authRetries += 1
+                DispatchQueue.main.asyncAfter(deadline: .now() + 45) { [weak self] in self?.refresh() }
+            }
         case .transient(let msg):
             // Rate-limited: back off (doubling per consecutive 429, capped) so we
             // stop draining the shared bucket and let it refill.
@@ -419,7 +460,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             // Keep the last good bars if we have them, but flag them as stale.
             if let u = lastUsage {
-                renderUsage(u, stale: true)
+                renderUsage(u, staleNote: "API busy")
             } else {
                 setTitle("⚠", warn: true)
                 rebuildMenu(rows: ["Couldn't reach usage API: \(msg).", "Will retry shortly."],
@@ -432,7 +473,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    func renderUsage(_ u: Usage, stale: Bool = false) {
+    func renderUsage(_ u: Usage, staleNote: String? = nil, forceNote: Bool = false) {
         var rows: [String] = []
         func add(_ label: String, _ w: UsageWindow?) {
             guard let w = w else { return }
@@ -479,10 +520,31 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let f = localFormatter("h:mm a")
             return "Updated \(f.string(from: d))"
         }
-        if stale && old, let f = footer {
-            footer = "⚠ API busy — last good \(f.replacingOccurrences(of: "Updated ", with: ""))"
+        // Show the note when the data is genuinely stale, or when the caller forces
+        // it (offline is a known fact, so flag it immediately even if data is fresh).
+        if let note = staleNote, old || forceNote, let f = footer {
+            footer = "⚠ \(note) — last good \(f.replacingOccurrences(of: "Updated ", with: ""))"
         }
         rebuildMenu(rows: rows, footer: footer, login: loginSoon)
+    }
+
+    /// Shown while the network is down: keep the last-good bars (flagged) if we
+    /// have them, otherwise a plain "waiting for network" note — never an alarming
+    /// login/auth error, since the token is fine and we simply can't reach the API.
+    func showOffline() {
+        if let u = lastUsage {
+            renderUsage(u, staleNote: "No network", forceNote: true)
+        } else {
+            setTitle("⚠ net", warn: true)
+            rebuildMenu(rows: ["Waiting for network…",
+                               "Usage will update once you're back online."],
+                        footer: nil, link: "Open claude.ai/settings/usage ↗")
+        }
+    }
+
+    @objc func didWake() {
+        // Give Wi-Fi/keychain a moment to come back after wake, then refresh.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.refresh() }
     }
 
     func setBars(five: Double, weekly: Double) {

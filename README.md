@@ -25,12 +25,15 @@ Click it for a popup with the exact figures:
 
 <img src="figures/claudewatch-popup.png" alt="claude-watch popup" width="50%">
 
-It refreshes in the background every 15 minutes and whenever you open the menu;
-the countdown ticks every minute. The usage endpoint shares a small rate-limit
-bucket with Claude Code and anything else using the same login, so on an
-HTTP 429 the widget backs off (exponentially, up to an hour) instead of hammering
-it, and marks the displayed figures **⚠ API busy — last good HH:MM** once they
-go stale rather than passing them off as current. The icon adapts to the menu
+It refreshes in the background every 15 minutes, whenever you open the menu, and
+when the Mac wakes from sleep; the countdown ticks every minute. It watches the
+network too (handy on a laptop): while you're offline it doesn't pester the API —
+it keeps your last-good bars and notes **⚠ No network — last good HH:MM** — and
+it re-fetches the instant you reconnect. The usage endpoint shares a small
+rate-limit bucket with Claude Code and anything else using the same login, so on
+an HTTP 429 the widget backs off (exponentially, up to an hour) instead of
+hammering it, and marks stale figures **⚠ API busy — last good HH:MM** rather
+than passing them off as current. The icon adapts to the menu
 bar; the title turns into a warning if the usage data can't be fetched. As your
 Claude login nears expiry the popup warns
 (**⚠ Login expires in NNm**) while it still works; once it has expired the menu

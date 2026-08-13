@@ -2,7 +2,7 @@ import Cocoa
 import Network
 
 // MARK: - Config
-let APP_VERSION = "0.8"
+let APP_VERSION = "0.9"
 let USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 let SETTINGS_URL = "https://claude.ai/settings/usage"
 let KEYCHAIN_SERVICE = "Claude Code-credentials"
@@ -21,6 +21,10 @@ let STALE_AFTER: TimeInterval = 20 * 60
 // When the OAuth token is within this many minutes of expiring, the popup warns
 // and offers the login button proactively — before fetches start failing.
 let EXPIRY_WARN_MINUTES = 60.0
+// Last-good usage is cached here so a restart (e.g. during a 429 backoff) can show
+// the previous figures, flagged stale, instead of a bare error until the first
+// successful fetch lands.
+let CACHE_FILE = "~/Library/Caches/com.traviswheeler.claudewatch/last-usage.json"
 // extra_usage dollar amounts come back in cents; divide to get dollars.
 let CENTS_PER_DOLLAR = 100.0
 // Bar fill is yellow normally, switching to red once a window passes this %.
@@ -29,18 +33,18 @@ let NORMAL_COLOR = NSColor(calibratedRed: 0.95, green: 0.78, blue: 0.0, alpha: 1
 let WARN_COLOR = NSColor.systemRed
 
 // MARK: - Models
-struct UsageWindow: Decodable {
+struct UsageWindow: Codable {
     let utilization: Double
     let resets_at: String?
 }
-struct ExtraUsage: Decodable {
+struct ExtraUsage: Codable {
     let is_enabled: Bool
     let monthly_limit: Double?
     let used_credits: Double?
     let utilization: Double?
     let currency: String?
 }
-struct Usage: Decodable {
+struct Usage: Codable {
     let five_hour: UsageWindow?
     let seven_day: UsageWindow?
     let seven_day_opus: UsageWindow?
@@ -106,6 +110,35 @@ func credentialsFromFile() -> Credentials? {
 func readCredentials() -> Credentials? {
     let found = [credentialsFromFile(), credentialsFromKeychain()].compactMap { $0 }
     return found.max { ($0.expiresAt ?? .distantPast) < ($1.expiresAt ?? .distantPast) }
+}
+
+// MARK: - Last-good cache
+// Persist the most recent successful reading so a relaunch has something to show
+// (flagged stale) even before its first fetch succeeds — important when that first
+// fetch lands on a 429 backoff and there's no in-memory fallback yet.
+struct CachedUsage: Codable {
+    let usage: Usage
+    let updatedAt: Date
+    let fiveReset: String?
+}
+
+func saveCache(_ u: Usage, updatedAt: Date, fiveReset: String?) {
+    let path = (CACHE_FILE as NSString).expandingTildeInPath
+    let dir = (path as NSString).deletingLastPathComponent
+    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    let enc = JSONEncoder()
+    enc.dateEncodingStrategy = .iso8601
+    if let data = try? enc.encode(CachedUsage(usage: u, updatedAt: updatedAt, fiveReset: fiveReset)) {
+        try? data.write(to: URL(fileURLWithPath: path))
+    }
+}
+
+func loadCache() -> CachedUsage? {
+    let path = (CACHE_FILE as NSString).expandingTildeInPath
+    guard let data = FileManager.default.contents(atPath: path) else { return nil }
+    let dec = JSONDecoder()
+    dec.dateDecodingStrategy = .iso8601
+    return try? dec.decode(CachedUsage.self, from: data)
 }
 
 // MARK: - Fetch
@@ -340,6 +373,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let pathMonitor = NWPathMonitor() // watches network reachability (laptops drop Wi-Fi)
     var networkUp = true              // last known network state
     var authRetries = 0              // quick self-heal attempts after an auth failure
+    var chasedReset: String?          // 5h resets_at we've already re-fetched after it lapsed
+    var appNapActivity: NSObjectProtocol?  // held to keep macOS from App-Napping our timers
 
     func applicationDidFinishLaunching(_ note: Notification) {
         statusItem.button?.title = "C …"
@@ -347,6 +382,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.autoenablesItems = false   // keep info rows full-color, not dimmed
         statusItem.menu = menu
         rebuildMenu(rows: ["Loading…"], footer: "Fetching…")
+
+        // Keep the 15-minute background poll firing on schedule. As a windowless
+        // accessory app we're a prime App Nap candidate, which would throttle the
+        // timers and leave the numbers frozen until the menu is next opened. This
+        // opts out of napping while still letting the Mac sleep normally.
+        appNapActivity = ProcessInfo.processInfo.beginActivity(
+            options: .userInitiatedAllowingIdleSystemSleep,
+            reason: "Keep the usage poll firing on schedule")
 
         // Watch network reachability: don't pester the usage API while offline
         // (that's what made a dropped Wi-Fi look like a login failure), and fetch
@@ -367,6 +410,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(didWake),
             name: NSWorkspace.didWakeNotification, object: nil)
+
+        // Show the last-good reading immediately (with its real timestamp) so a
+        // relaunch isn't blank, and so a first fetch that lands on a 429 has a
+        // fallback to display instead of a bare error.
+        if let c = loadCache() {
+            lastUsage = c.usage
+            lastUpdated = c.updatedAt
+            fiveReset = c.fiveReset
+            renderUsage(c.usage)
+        }
 
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: REFRESH_INTERVAL, repeats: true) { [weak self] _ in
@@ -434,8 +487,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             backoffUntil = nil
             authRetries = 0
             lastUsage = u
-            lastUpdated = Date()
+            let now = Date()
+            lastUpdated = now
             renderUsage(u)
+            saveCache(u, updatedAt: now, fiveReset: u.five_hour?.resets_at)
         case .authError:
             setTitle("⚠ login", warn: true)
             rebuildMenu(rows: ["Claude login expired or rejected.",
@@ -443,12 +498,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         footer: nil, link: "Open claude.ai/settings/usage ↗",
                         login: true)
             // An auth failure can be transient (token mid-rotation, keychain not
-            // ready just after wake). Retry a few times quickly so a blip clears
-            // in seconds instead of lingering until the next 15-min poll; a real
-            // logout just settles back onto the normal cadence.
-            if authRetries < 4 {
+            // ready just after wake). Retry gently to clear a blip — but each retry
+            // spends one of the ~5 shared rate-limit tokens, so too many turn a
+            // brief 401 into a 429 lockout. Two spaced attempts, then settle back
+            // onto the normal 15-min poll (a real logout just stays on ⚠ login).
+            if authRetries < 2 {
                 authRetries += 1
-                DispatchQueue.main.asyncAfter(deadline: .now() + 45) { [weak self] in self?.refresh() }
+                let delay = authRetries == 1 ? 30.0 : 90.0
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.refresh() }
             }
         case .transient(let msg):
             // Rate-limited: back off (doubling per consecutive 429, capped) so we
@@ -564,6 +621,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func updateCountdownText() {
         guard let button = statusItem.button, button.image != nil else { return }
         let reset = countdown(fiveReset)
+        // The 5h window's reset time just lapsed: the shown figures belong to a
+        // finished window, so pull the fresh one instead of sitting on "now" until
+        // the next scheduled poll. Once per reset value (respecting 429 backoff) so
+        // we don't drain the shared rate-limit bucket chasing a slow server rollover.
+        if reset == "now", let r = fiveReset, r != chasedReset {
+            chasedReset = r
+            refresh(force: false)
+        }
         button.imagePosition = reset.isEmpty ? .imageOnly : .imageLeading
         button.attributedTitle = NSAttributedString(
             string: reset.isEmpty ? "" : " \(reset)",

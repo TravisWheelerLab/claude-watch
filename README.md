@@ -25,8 +25,11 @@ Click it for a popup with the exact figures:
 
 <img src="figures/claudewatch-popup.png" alt="claude-watch popup" width="50%">
 
-It refreshes in the background every 15 minutes, whenever you open the menu, and
-when the Mac wakes from sleep; the countdown ticks every minute. It watches the
+It refreshes in the background every 15 minutes, whenever you open the menu, when
+the Mac wakes from sleep, and the moment a 5-hour window resets (so the countdown
+never sticks on `now`); the countdown ticks every minute. It remembers the last
+reading across restarts, so it shows your figures right away — flagged if stale —
+instead of a blank while the first fetch runs. It watches the
 network too (handy on a laptop): while you're offline it doesn't pester the API —
 it keeps your last-good bars and notes **⚠ No network — last good HH:MM** — and
 it re-fetches the instant you reconnect. The usage endpoint shares a small

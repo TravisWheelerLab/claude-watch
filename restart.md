@@ -1,6 +1,6 @@
 # claude-watch — restart / handoff notes
 
-Everything you need to pick this project back up. Current release: **v0.9**.
+Everything you need to pick this project back up. Current release: **v0.10**.
 
 ## What it is
 A tiny macOS menu-bar widget (single Swift file, Cocoa) that shows your Claude
@@ -80,6 +80,12 @@ endpoint with curl** — a few probes drain the bucket and you'll mislead yourse
   error (`saveCache`/`loadCache`, models now `Codable`); gentler auth self-heal —
   2 spaced retries (30s, 90s) instead of 4, since each burns a shared bucket token
   and can escalate a brief 401 into a 429 lockout.
+- v0.10 stop flashing the "⚠ login" plaque on transient 401s. `apply(.authError)`
+  now keeps showing last-good bars during the self-heal retries and only surfaces
+  the login prompt when the token has actually expired (`tokenExpiry < now`), the
+  retries are spent (`authRetries >= 2`), or there's no cached usage to fall back
+  on. v0.9's App-Nap opt-out made the plaque more visible (reliable polling lands
+  in more token-rotation windows), which is what surfaced this.
 
 ## Self-update (answer to "how do users on old versions upgrade")
 Built-in. Checks at launch, every 6h, and on menu-open; if the checkout is behind

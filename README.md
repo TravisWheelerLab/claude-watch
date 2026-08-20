@@ -39,8 +39,11 @@ hammering it, and marks stale figures **⚠ API busy — last good HH:MM** rathe
 than passing them off as current. The icon adapts to the menu
 bar; the title turns into a warning if the usage data can't be fetched. As your
 Claude login nears expiry the popup warns
-(**⚠ Login expires in NNm**) while it still works; once it has expired the menu
-bar shows a red **⚠ login**. In both cases the popup offers a **🔑 Log in to
+(**⚠ Login expires in NNm**) while it still works; once it has actually expired,
+or a rejected-login keeps failing, the menu bar shows a red **⚠ login**. A
+momentary token hiccup (Claude Code rotating the token, say) is ridden out
+silently, keeping your last-good numbers, so the login plaque only appears when
+you really need to sign in. In both cases the popup offers a **🔑 Log in to
 Claude…** item that opens a Terminal running `claude auth login`, refreshing the
 keychain token in place (reopening the app alone won't — it just re-reads
 whatever token is already there).

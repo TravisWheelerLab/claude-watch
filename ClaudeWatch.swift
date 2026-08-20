@@ -2,7 +2,7 @@ import Cocoa
 import Network
 
 // MARK: - Config
-let APP_VERSION = "0.9"
+let APP_VERSION = "0.10"
 let USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 let SETTINGS_URL = "https://claude.ai/settings/usage"
 let KEYCHAIN_SERVICE = "Claude Code-credentials"
@@ -492,21 +492,31 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             renderUsage(u)
             saveCache(u, updatedAt: now, fiveReset: u.five_hour?.resets_at)
         case .authError:
+            // Keep a gentle self-heal retry going: a 401 often clears once Claude
+            // Code rotates the token and readCredentials picks up the fresh one.
+            // Each retry spends one of the ~5 shared rate-limit tokens, so cap it at
+            // two spaced attempts before settling back onto the normal 15-min poll.
+            let retryScheduled = authRetries < 2
+            if retryScheduled {
+                authRetries += 1
+                let delay = authRetries == 1 ? 30.0 : 90.0
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.refresh() }
+            }
+            // Don't slam the alarming "⚠ login" plaque up on a brief blip. If the
+            // stored token still looks valid and we have good numbers, keep showing
+            // them and let the retry clear it quietly. Only surface the login prompt
+            // once the token has actually expired, the retries are spent, or there's
+            // nothing to fall back on.
+            let tokenExpired = tokenExpiry.map { $0 < Date() } ?? false
+            if !tokenExpired, retryScheduled, let u = lastUsage {
+                renderUsage(u)
+                return
+            }
             setTitle("⚠ login", warn: true)
             rebuildMenu(rows: ["Claude login expired or rejected.",
                                "Click below to sign in again."],
                         footer: nil, link: "Open claude.ai/settings/usage ↗",
                         login: true)
-            // An auth failure can be transient (token mid-rotation, keychain not
-            // ready just after wake). Retry gently to clear a blip — but each retry
-            // spends one of the ~5 shared rate-limit tokens, so too many turn a
-            // brief 401 into a 429 lockout. Two spaced attempts, then settle back
-            // onto the normal 15-min poll (a real logout just stays on ⚠ login).
-            if authRetries < 2 {
-                authRetries += 1
-                let delay = authRetries == 1 ? 30.0 : 90.0
-                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.refresh() }
-            }
         case .transient(let msg):
             // Rate-limited: back off (doubling per consecutive 429, capped) so we
             // stop draining the shared bucket and let it refill.
